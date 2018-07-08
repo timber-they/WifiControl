@@ -1,31 +1,22 @@
 package de.teemze.wificontrol;
 
-import android.Manifest;
 import android.content.Context;
-import android.content.pm.PackageManager;
 import android.media.AudioManager;
 import android.net.nsd.NsdManager;
 import android.net.nsd.NsdServiceInfo;
 import android.os.Build;
-import android.os.StrictMode;
-import android.provider.MediaStore;
-import android.support.annotation.NonNull;
-import android.support.v4.app.ActivityCompat;
-import android.support.v4.content.ContextCompat;
-import android.support.v7.app.AppCompatActivity;
 import android.os.Bundle;
-import android.util.Log;
+import android.os.StrictMode;
+import android.support.annotation.NonNull;
+import android.support.v7.app.AppCompatActivity;
 import android.view.KeyEvent;
 import android.view.View;
 import android.widget.Button;
 
 import java.io.IOException;
-import java.io.InputStream;
 import java.net.InetAddress;
-import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
-import java.util.Calendar;
 
 public class MainActivity extends AppCompatActivity
 {
@@ -45,6 +36,127 @@ public class MainActivity extends AppCompatActivity
     private AudioManager AudioManager;
     private Thread InputWaiter;
     private Socket OtherSocketConnector;
+    private MetaLog Log;
+
+    class MyResolveListener implements android.net.nsd.NsdManager.ResolveListener
+    {
+        @Override
+        public void onResolveFailed(NsdServiceInfo nsdServiceInfo, int i)
+        {
+            Log.e("WifiControl", "Service resolving failed. Error code: " + i);
+        }
+
+        @Override
+        public void onServiceResolved(NsdServiceInfo nsdServiceInfo)
+        {
+            Log.d("WifiControl", "Service resolved: " + nsdServiceInfo.getServiceName());
+
+            if (nsdServiceInfo.getServiceName().equals(ServiceName))
+            {
+                Log.e("WifiControl", "Same IP.");
+                return;
+            }
+
+            if (InputWaiter != null && InputWaiter.isAlive())
+            {
+                Interrupted = true;
+                InputWaiter.interrupt();
+                Interrupted = false;
+            }
+
+            OtherServiceInfo = nsdServiceInfo;
+            OtherServicePort = nsdServiceInfo.getPort();
+            OtherHost = nsdServiceInfo.getHost();
+            InputWaiter = new Thread(() ->
+            {
+                try
+                {
+                    OtherSocket = new Socket(OtherHost.getHostAddress(), OtherServicePort);
+
+                    OtherSocketConnector = ServerSocket.accept();
+
+                    send(42);
+
+                    while (!Interrupted)
+                    {
+                        try
+                        {
+                            int message;
+                            while ((message = OtherSocketConnector.getInputStream().read()) == -1)
+                            {
+                                if (Interrupted)
+                                    return;
+                            }
+                            receive(message);
+
+                            OtherSocketConnector.getOutputStream().write(("Received signal " + message).getBytes());
+                            OtherSocketConnector.getOutputStream().flush();
+                        } catch (IOException e)
+                        {
+                            e.printStackTrace();
+                        }
+                    }
+                    OtherSocket.close();
+                    OtherSocketConnector.close();
+
+                } catch (IOException e)
+                {
+                    e.printStackTrace();
+                }
+            });
+            InputWaiter.start();
+        }
+    }
+
+    class MyDiscoveryListener implements android.net.nsd.NsdManager.DiscoveryListener
+    {
+        @Override
+        public void onStartDiscoveryFailed(String s, int i)
+        {
+            Log.e("WifiControl", "Discovery failed. Error code: " + i);
+            NsdManager.stopServiceDiscovery(this);
+        }
+
+        @Override
+        public void onStopDiscoveryFailed(String s, int i)
+        {
+            Log.e("WifiControl", "Discovery failed. Error code: " + i);
+            NsdManager.stopServiceDiscovery(this);
+        }
+
+        @Override
+        public void onDiscoveryStarted(String s)
+        {
+            Log.d("WifiControl", "Service discovery started");
+        }
+
+        @Override
+        public void onDiscoveryStopped(String s)
+        {
+            Log.i("WifiControl", "Discovery stopped: " + s);
+        }
+
+        @Override
+        public void onServiceFound(NsdServiceInfo nsdServiceInfo)
+        {
+            Log.d("WifiControl", "Service discovery success: " + nsdServiceInfo);
+            String type = nsdServiceInfo.getServiceType().trim();
+            if (type.toCharArray()[type.length() - 1] == '.')
+                type = type.substring(0, type.length() - 1);
+            if (!type.equals(SERVICE_TYPE))
+                Log.d("WifiControl", "Unknown Service Type: " + nsdServiceInfo.getServiceType());
+            else if (nsdServiceInfo.getServiceName().equals(ServiceName))
+                Log.d("WifiControls", "Same machine: " + ServiceName);
+            else if (nsdServiceInfo.getServiceName().contains("NsdWifiControl"))
+                NsdManager.resolveService(nsdServiceInfo, ResolveListener);
+        }
+
+        @Override
+        public void onServiceLost(NsdServiceInfo nsdServiceInfo)
+        {
+            Log.e("WifiControl", "Service lost: " + nsdServiceInfo);
+        }
+    }
 
     @Override
     protected void onCreate(Bundle savedInstanceState)
@@ -57,7 +169,10 @@ public class MainActivity extends AppCompatActivity
 
     private void init()
     {
+        Log = new MetaLog(findViewById(R.id.textView), this);
+
         Log.i("WifiControl", "Init");
+
         StrictMode.ThreadPolicy policy = new StrictMode.ThreadPolicy.Builder().permitAll().build();
         StrictMode.setThreadPolicy(policy);
 
@@ -65,145 +180,22 @@ public class MainActivity extends AppCompatActivity
         playButton.setOnClickListener(this::handleButtonClick);
 
         AudioManager = (AudioManager) getSystemService(AUDIO_SERVICE);
+        assert AudioManager != null;
+        AudioManager.setMode(android.media.AudioManager.MODE_NORMAL);
 
         initializeServerSocket();
         initializeRegistrationListener();
         registerService(LocalPort);
 
-        ResolveListener = new NsdManager.ResolveListener()
-        {
-            @Override
-            public void onResolveFailed(NsdServiceInfo nsdServiceInfo, int i)
-            {
-                Log.e("WifiControl", "Service resolving failed. Error code: " + i);
-            }
-
-            @Override
-            public void onServiceResolved(NsdServiceInfo nsdServiceInfo)
-            {
-                Log.d("WifiControl", "Service resolved: " + nsdServiceInfo.getServiceName());
-
-                if (nsdServiceInfo.getServiceName().equals(ServiceName))
-                {
-                    Log.e("WifiControl", "Same IP.");
-                    return;
-                }
-
-                if (InputWaiter != null && InputWaiter.isAlive())
-                {
-                    Interrupted = true;
-                    InputWaiter.interrupt();
-                    Interrupted = false;
-                }
-
-                OtherServiceInfo = nsdServiceInfo;
-                OtherServicePort = nsdServiceInfo.getPort();
-                OtherHost = nsdServiceInfo.getHost();
-                try
-                {
-                    OtherSocket = new Socket(OtherHost.getHostAddress(), OtherServicePort);
-                    InputStream inputStream = OtherSocket.getInputStream();
-                    InputWaiter = new Thread(() ->
-                    {
-                        try
-                        {
-                            OtherSocketConnector = ServerSocket.accept();
-                        } catch (IOException e)
-                        {
-                            e.printStackTrace();
-                        }
-
-                        while (!Interrupted)
-                        {
-                            try
-                            {
-                                int message;
-                                while ((message = inputStream.read()) == -1)
-                                {
-                                    if (Interrupted)
-                                        return;
-                                }
-                                receive(message);
-
-                                OtherSocketConnector.getOutputStream().write(("Received signal " + message).getBytes());
-                            } catch (IOException e)
-                            {
-                                e.printStackTrace();
-                            }
-                        }
-
-                        try
-                        {
-                            OtherSocket.close();
-                            OtherSocketConnector.close();
-                        } catch (IOException e)
-                        {
-                            e.printStackTrace();
-                        }
-                    });
-                    InputWaiter.start();
-                } catch (IOException e)
-                {
-                    e.printStackTrace();
-                }
-            }
-        };
-
-        DiscoveryListener = new NsdManager.DiscoveryListener()
-        {
-            @Override
-            public void onStartDiscoveryFailed(String s, int i)
-            {
-                Log.e("WifiControl", "Discovery failed. Error code: " + i);
-                NsdManager.stopServiceDiscovery(this);
-            }
-
-            @Override
-            public void onStopDiscoveryFailed(String s, int i)
-            {
-                Log.e("WifiControl", "Discovery failed. Error code: " + i);
-                NsdManager.stopServiceDiscovery(this);
-            }
-
-            @Override
-            public void onDiscoveryStarted(String s)
-            {
-                Log.d("WifiControl", "Service discovery started");
-            }
-
-            @Override
-            public void onDiscoveryStopped(String s)
-            {
-                Log.i("WifiControl", "Discovery stopped: " + s);
-            }
-
-            @Override
-            public void onServiceFound(NsdServiceInfo nsdServiceInfo)
-            {
-                Log.d("WifiControl", "Service discovery success: " + nsdServiceInfo);
-                String type = nsdServiceInfo.getServiceType().trim();
-                if (type.toCharArray()[type.length() - 1] == '.')
-                    type = type.substring(0, type.length() - 1);
-                if (!type.equals(SERVICE_TYPE))
-                    Log.d("WifiControl", "Unknown Service Type: " + nsdServiceInfo.getServiceType());
-                else if (nsdServiceInfo.getServiceName().equals(ServiceName))
-                    Log.d("WifiControls", "Same machine: " + ServiceName);
-                else if (nsdServiceInfo.getServiceName().contains("NsdWifiControl"))
-                    NsdManager.resolveService(nsdServiceInfo, ResolveListener);
-            }
-
-            @Override
-            public void onServiceLost(NsdServiceInfo nsdServiceInfo)
-            {
-                Log.e("WifiControl", "Service lost: " + nsdServiceInfo);
-            }
-        };
+        ResolveListener = new MyResolveListener();
+        DiscoveryListener = new MyDiscoveryListener();
 
         discoverServices();
     }
 
     private void discoverServices()
     {
+        Log.d("WifiControl", "Discovering services");
         NsdManager.discoverServices(SERVICE_TYPE, android.net.nsd.NsdManager.PROTOCOL_DNS_SD, DiscoveryListener);
     }
 
@@ -214,22 +206,31 @@ public class MainActivity extends AppCompatActivity
 
     private void send(int code)
     {
-        if (OtherSocket != null)
-        {
-            try
+        Thread sendingThread = new Thread(() -> {
+            if (OtherSocket != null)
             {
-                OtherSocket.getOutputStream().write(code);
-                byte[] response = new byte["Received signal ".length()];
-                if (OtherSocket.getInputStream().read(response) != response.length)
-                    Log.e("WifiControl", "Invalid response: " + new String(response));
-                else
-                    Log.i("WifiControl", new String(response));
-            } catch (IOException e)
-            {
-                e.printStackTrace();
-            }
-        } else
-            Log.e("WifiControl", "Other service isn't connected yet.");
+                Log.i("WifiControl", "Connected: \nOtherSocket: " + OtherSocket.isConnected() +
+                        "\nOtherSocketConnector: " + (OtherSocketConnector == null ? "Null" : OtherSocketConnector
+                        .isConnected()));
+                try
+                {
+                    Log.d("WifiControl", "Sending " + code);
+                    OtherSocket.getOutputStream().write(code);
+                    OtherSocket.getOutputStream().flush();
+                    byte[] response = new byte["Received signal ".length()];
+                    if (OtherSocket.getInputStream().read(response) != response.length)
+                        Log.e("WifiControl", "Invalid response: " + new String(response));
+                    else
+                        Log.i("WifiControl", "Response: " + new String(response));
+                } catch (IOException e)
+                {
+                    e.printStackTrace();
+                }
+            } else
+                Log.e("WifiControl", "Other service isn't connected yet.");
+        });
+
+        sendingThread.start();
     }
 
     private void receive(int code)
@@ -272,6 +273,7 @@ public class MainActivity extends AppCompatActivity
         {
             ServerSocket = new ServerSocket(0);
             LocalPort = ServerSocket.getLocalPort();
+            Log.i("WifiControl", "Server socket bound: " + ServerSocket.isBound());
 
         } catch (IOException e)
         {
@@ -337,5 +339,7 @@ public class MainActivity extends AppCompatActivity
         NsdManager.unregisterService(RegistrationListener);
         NsdManager.stopServiceDiscovery(DiscoveryListener);
         Interrupted = true;
+
+        Log.i("WifiControl", "TearDown. OtherSocket: " + (OtherSocket == null ? "Null" : OtherSocket.isConnected()));
     }
 }
