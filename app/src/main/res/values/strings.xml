@@ -1,4 +1,10 @@
 <resources>
     <string name="app_name">WifiControl</string>
-    <string name="playSign">⏯️</string>
+    <string name="playSign">►️</string>
+    <string name="pauseSign">||</string>
+    <string name="previousSign"><![CDATA[<<]]></string>
+    <string name="nextSign"><![CDATA[>>]]></string>
+    <string name="volumeUpSign">+</string>
+    <string name="volumeDownSign">-</string>
+    <string name="Refresh">Refresh</string>
 </resources>
